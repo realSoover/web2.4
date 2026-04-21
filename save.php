@@ -2,9 +2,9 @@
 // save.php
 session_start();
 require_once 'config.php';
+require_once 'auth.php';
 
-// Функции валидации с расширенными регулярными выражениями и сообщениями о допустимых символах
-
+// Функции валидации (остаются те же, что и были)
 function validateFullName($name) {
     if (empty($name)) {
         return "ФИО обязательно для заполнения";
@@ -12,7 +12,6 @@ function validateFullName($name) {
     if (strlen($name) > 150) {
         return "ФИО не должно превышать 150 символов (текущая длина: " . strlen($name) . ")";
     }
-    // Разрешаем: русские буквы (включая Ёё), английские буквы, пробелы, дефисы
     if (!preg_match('/^[а-яА-ЯёЁa-zA-Z\s\-]+$/u', $name)) {
         return "ФИО должно содержать только буквы (русские или английские), пробелы и дефисы. Недопустимые символы: цифры, знаки препинания, спецсимволы";
     }
@@ -23,7 +22,6 @@ function validatePhone($phone) {
     if (empty($phone)) {
         return "Телефон обязателен для заполнения";
     }
-    // Разрешаем: цифры, пробелы, +, -, (, ) - от 5 до 20 символов
     if (!preg_match('/^[\d\s\+\-\(\)]{5,20}$/', $phone)) {
         return "Телефон должен содержать от 5 до 20 символов. Допустимые символы: цифры (0-9), пробелы, +, -, (, ). Пример: +7 (999) 123-45-67";
     }
@@ -47,7 +45,6 @@ function validateBirthDate($date) {
     if (empty($date)) {
         return "Дата рождения обязательна для заполнения";
     }
-    // Проверка формата YYYY-MM-DD
     if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
         return "Дата рождения должна быть в формате ГГГГ-ММ-ДД (год-месяц-день). Пример: 1990-05-15";
     }
@@ -116,15 +113,20 @@ function validateContract($contract) {
     return null;
 }
 
-// Сохранение данных в БД
+// Сохранение данных в БД (новая версия с логином и паролем)
 function saveFormData($pdo, $data, $languages) {
     try {
         $pdo->beginTransaction();
         
+        // Генерируем логин и пароль
+        $login = generateLogin($data['full_name'], $pdo);
+        $password = generatePassword();
+        $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+        
         // Вставка в таблицу users
         $stmt = $pdo->prepare("
-            INSERT INTO users (full_name, phone, email, birth_date, gender, biography, contract_accepted)
-            VALUES (:full_name, :phone, :email, :birth_date, :gender, :biography, :contract_accepted)
+            INSERT INTO users (full_name, phone, email, birth_date, gender, biography, contract_accepted, login, password_hash)
+            VALUES (:full_name, :phone, :email, :birth_date, :gender, :biography, :contract_accepted, :login, :password_hash)
         ");
         
         $stmt->execute([
@@ -134,7 +136,9 @@ function saveFormData($pdo, $data, $languages) {
             ':birth_date' => $data['birth_date'],
             ':gender' => $data['gender'],
             ':biography' => $data['biography'] ?? '',
-            ':contract_accepted' => isset($data['contract_accepted']) ? 1 : 0
+            ':contract_accepted' => isset($data['contract_accepted']) ? 1 : 0,
+            ':login' => $login,
+            ':password_hash' => $passwordHash
         ]);
         
         $userId = $pdo->lastInsertId();
@@ -154,7 +158,7 @@ function saveFormData($pdo, $data, $languages) {
         }
         
         $pdo->commit();
-        return $userId;
+        return ['userId' => $userId, 'login' => $login, 'password' => $password];
         
     } catch (Exception $e) {
         $pdo->rollBack();
@@ -175,7 +179,6 @@ function saveToCookies($data, $languages) {
         'contract_accepted' => isset($data['contract_accepted']) ? '1' : ''
     ];
     
-    // Сохраняем в cookie на 1 год (365 дней)
     setcookie('saved_form_data', json_encode($saveData), time() + 365 * 24 * 60 * 60, '/');
 }
 
@@ -223,10 +226,8 @@ if ($error = validateContract($_POST['contract_accepted'] ?? '')) {
 
 // Если есть ошибки, сохраняем в cookies и возвращаемся
 if (!empty($errors)) {
-    // Сохраняем ошибки в cookie
-    setcookie('form_errors', json_encode($errors), time() + 300, '/'); // на 5 минут
+    setcookie('form_errors', json_encode($errors), time() + 300, '/');
     
-    // Сохраняем введенные данные в cookie
     $oldData = [
         'full_name' => $_POST['full_name'] ?? '',
         'phone' => $_POST['phone'] ?? '',
@@ -237,8 +238,42 @@ if (!empty($errors)) {
         'biography' => $_POST['biography'] ?? '',
         'contract_accepted' => isset($_POST['contract_accepted']) ? '1' : ''
     ];
-    setcookie('form_old', json_encode($oldData), time() + 300, '/'); // на 5 минут
+    setcookie('form_old', json_encode($oldData), time() + 300, '/');
     
     header('Location: index.php');
     exit;
 }
+
+// Проверяем, авторизован ли пользователь и есть ли параметр edit
+$isEdit = isset($_POST['edit_mode']) && $_POST['edit_mode'] === '1' && isAuthenticated();
+
+if ($isEdit) {
+    // Режим редактирования
+    $userId = getCurrentUserId();
+    try {
+        if (updateUserData($userId, $_POST, $languages, $pdo)) {
+            // Обновляем данные в cookies
+            saveToCookies($_POST, $languages);
+            header('Location: index.php?success=1&edited=1&id=' . $userId);
+        } else {
+            header('Location: index.php?error=update_failed');
+        }
+    } catch (Exception $e) {
+        header('Location: index.php?error=db_error');
+    }
+} else {
+    // Режим новой регистрации
+    try {
+        $result = saveFormData($pdo, $_POST, $languages);
+        saveToCookies($_POST, $languages);
+        
+        // Автоматически авторизуем пользователя после регистрации
+        login($result['login'], $result['password'], $pdo);
+        
+        header('Location: index.php?success=1&id=' . $result['userId'] . '&login=' . urlencode($result['login']) . '&password=' . urlencode($result['password']));
+    } catch (Exception $e) {
+        header('Location: index.php?error=db_error');
+    }
+}
+exit;
+?>

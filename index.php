@@ -1,5 +1,5 @@
 // index.php 
-
+<?php
 session_start();
 
 // Получаем ошибки из cookies (если есть)
