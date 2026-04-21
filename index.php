@@ -1,6 +1,21 @@
-// index.php 
 <?php
-session_start();
+// index.php - Главная страница с формой регистрации
+
+
+require_once 'config.php';
+require_once 'auth.php';
+
+// Генерация CSRF токена
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+// Проверяем, авторизован ли пользователь как администратор (для отображения ссылки)
+$isAdmin = false;
+if (isset($_SERVER['PHP_AUTH_USER']) && isset($_SERVER['PHP_AUTH_PW'])) {
+    require_once 'admin_auth.php';
+    $isAdmin = checkAdminCredentials($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']);
+}
 
 // Получаем ошибки из cookies (если есть)
 $errors = [];
@@ -8,7 +23,7 @@ $errorCookie = $_COOKIE['form_errors'] ?? '';
 if ($errorCookie) {
     $errors = json_decode($errorCookie, true) ?: [];
     // Удаляем cookie после чтения
-    setcookie('form_errors', '', time() - 3600, '/');
+    setcookie('form_errors', '', time() - 3600, '/', '', false, true);
 }
 
 // Получаем старые значения из cookies (если были ошибки)
@@ -16,7 +31,7 @@ $old = [];
 $oldCookie = $_COOKIE['form_old'] ?? '';
 if ($oldCookie) {
     $old = json_decode($oldCookie, true) ?: [];
-    setcookie('form_old', '', time() - 3600, '/');
+    setcookie('form_old', '', time() - 3600, '/', '', false, true);
 }
 
 // Получаем сохраненные значения из cookies (на год)
@@ -26,10 +41,34 @@ if ($savedCookie) {
     $savedData = json_decode($savedCookie, true) ?: [];
 }
 
+// Если пользователь авторизован, загружаем его данные из БД
+$userData = null;
+if (isAuthenticated()) {
+    $userId = getCurrentUserId();
+    $userData = getUserData($userId, $pdo);
+    if ($userData) {
+        // Подготавливаем данные для отображения в форме
+        $old = [
+            'full_name' => htmlspecialchars($userData['full_name'], ENT_QUOTES, 'UTF-8'),
+            'phone' => htmlspecialchars($userData['phone'], ENT_QUOTES, 'UTF-8'),
+            'email' => htmlspecialchars($userData['email'], ENT_QUOTES, 'UTF-8'),
+            'birth_date' => htmlspecialchars($userData['birth_date'], ENT_QUOTES, 'UTF-8'),
+            'gender' => htmlspecialchars($userData['gender'], ENT_QUOTES, 'UTF-8'),
+            'languages' => $userData['languages'] ?? [],
+            'biography' => htmlspecialchars($userData['biography'], ENT_QUOTES, 'UTF-8'),
+            'contract_accepted' => $userData['contract_accepted'] ? '1' : ''
+        ];
+    }
+}
+
 // Объединяем: сначала старые значения (при ошибке), потом сохраненные (при первом заходе)
 if (empty($old) && !empty($savedData)) {
     $old = $savedData;
 }
+
+// Список языков программирования
+$languagesList = ['Pascal', 'C', 'C++', 'JavaScript', 'PHP', 'Python', 
+                  'Java', 'Haskell', 'Clojure', 'Prolog', 'Scala', 'Go'];
 ?>
 <!DOCTYPE html>
 <html lang="ru">
@@ -37,6 +76,8 @@ if (empty($old) && !empty($savedData)) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Регистрационная форма</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <style>
         * {
             box-sizing: border-box;
@@ -117,6 +158,35 @@ if (empty($old) && !empty($savedData)) {
         @keyframes glowPulse {
             0%, 100% { text-shadow: 0 0 10px rgba(0, 255, 255, 0.5); }
             50% { text-shadow: 0 0 20px rgba(255, 0, 255, 0.8); }
+        }
+        
+        .header-buttons {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .auth-btn {
+            color: #00ffff;
+            text-decoration: none;
+            padding: 8px 20px;
+            border: 2px solid #00ffff;
+            border-radius: 25px;
+            transition: all 0.3s;
+            display: inline-block;
+            font-size: 0.9rem;
+        }
+        
+        .auth-btn:hover {
+            background: rgba(0, 255, 255, 0.1);
+            transform: translateY(-2px);
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+        }
+        
+        .admin-btn {
+            border-color: #ff00ff;
+            color: #ff00ff;
         }
         
         .form-grid {
@@ -294,12 +364,6 @@ if (empty($old) && !empty($savedData)) {
         select[multiple] option:checked {
             background: linear-gradient(45deg, #00ffff, #ff00ff);
             color: #fff;
-            animation: glow 1s infinite;
-        }
-        
-        @keyframes glow {
-            0%, 100% { filter: brightness(1); }
-            50% { filter: brightness(1.2); }
         }
         
         textarea {
@@ -444,6 +508,27 @@ if (empty($old) && !empty($savedData)) {
             color: #7ab8d0;
         }
         
+        .auth-info {
+            background: rgba(255, 0, 255, 0.1);
+            border-color: #ff00ff;
+        }
+        
+        .auth-info a {
+            color: #ff00ff;
+            float: right;
+            text-decoration: none;
+        }
+        
+        .auth-info a:hover {
+            text-decoration: underline;
+        }
+        
+        .clearfix::after {
+            content: '';
+            clear: both;
+            display: table;
+        }
+        
         @media (max-width: 768px) {
             .container {
                 padding: 25px;
@@ -465,22 +550,51 @@ if (empty($old) && !empty($savedData)) {
                 padding: 14px 28px;
                 font-size: 1rem;
             }
+            
+            .header-buttons {
+                flex-direction: column;
+            }
+            
+            .auth-btn {
+                text-align: center;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
+        <div class="header-buttons">
+            <?php if ($isAdmin): ?>
+                <a href="admin.php" class="auth-btn admin-btn">👑 Админ-панель</a>
+            <?php endif; ?>
+            
+            <?php if (!isAuthenticated()): ?>
+                <a href="login.php" class="auth-btn">🔑 Войти</a>
+            <?php else: ?>
+                <a href="logout.php" class="auth-btn">🚪 Выйти (<?= htmlspecialchars($_SESSION['user_login'] ?? '', ENT_QUOTES, 'UTF-8') ?>)</a>
+            <?php endif; ?>
+        </div>
+        
         <h1>✨ Регистрация ✨</h1>
         
         <div class="info-note">
             💡 Подсказка: Ваши данные сохраняются в cookies на год. При следующем посещении поля будут автоматически заполнены.
         </div>
         
+        <?php if (isAuthenticated()): ?>
+            <div class="info-note auth-info clearfix">
+                🔐 Вы авторизованы как: <strong><?= htmlspecialchars($_SESSION['user_login'] ?? '', ENT_QUOTES, 'UTF-8') ?></strong>
+                <a href="logout.php">Выйти</a>
+                <div style="clear: both;"></div>
+            </div>
+        <?php endif; ?>
+        
         <?php if (!empty($errors)): ?>
             <div class="error-messages">
                 <?php foreach ($errors as $field => $error): ?>
                     <div class="error-message-item">
-                        <strong>⚠️ <?= htmlspecialchars($field) ?>:</strong> <?= htmlspecialchars($error) ?>
+                        <strong>⚠️ <?= htmlspecialchars($field, ENT_QUOTES, 'UTF-8') ?>:</strong> 
+                        <?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?>
                     </div>
                 <?php endforeach; ?>
             </div>
@@ -488,25 +602,68 @@ if (empty($old) && !empty($savedData)) {
         
         <?php if (isset($_GET['success']) && $_GET['success'] == 1): ?>
             <div class="success-message">
-                ✓ Данные успешно сохранены! ID записи: <?= htmlspecialchars($_GET['id'] ?? '') ?>
+                ✓ Данные успешно сохранены! ID записи: <?= htmlspecialchars($_GET['id'] ?? '', ENT_QUOTES, 'UTF-8') ?>
+                <?php if (isset($_GET['login']) && isset($_GET['password'])): ?>
+                    <br><br>
+                    <strong>🔑 Ваши данные для входа:</strong><br>
+                    Логин: <code style="background: #0a0f1f; padding: 5px 10px; border-radius: 5px; display: inline-block; margin: 5px 0;"><?= htmlspecialchars($_GET['login'], ENT_QUOTES, 'UTF-8') ?></code><br>
+                    Пароль: <code style="background: #0a0f1f; padding: 5px 10px; border-radius: 5px; display: inline-block; margin: 5px 0;"><?= htmlspecialchars($_GET['password'], ENT_QUOTES, 'UTF-8') ?></code><br>
+                    <small style="color: #ff00ff;">⚠️ Сохраните эти данные! Они понадобятся для входа.</small>
+                <?php endif; ?>
+                <?php if (isset($_GET['edited']) && $_GET['edited'] == 1): ?>
+                    <br><br>
+                    <strong>✏️ Данные успешно обновлены!</strong>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+        
+        <?php if (isset($_GET['error'])): ?>
+            <div class="error-messages">
+                <div class="error-message-item">
+                    <strong>⚠️ Ошибка:</strong> 
+                    <?php 
+                    $errorMsg = '';
+                    switch($_GET['error']) {
+                        case 'security':
+                            $errorMsg = 'Ошибка безопасности. Пожалуйста, обновите страницу и попробуйте снова.';
+                            break;
+                        case 'db_error':
+                            $errorMsg = 'Ошибка базы данных. Пожалуйста, попробуйте позже.';
+                            break;
+                        case 'update_failed':
+                            $errorMsg = 'Ошибка при обновлении данных.';
+                            break;
+                        default:
+                            $errorMsg = 'Произошла неизвестная ошибка.';
+                    }
+                    echo htmlspecialchars($errorMsg, ENT_QUOTES, 'UTF-8');
+                    ?>
+                </div>
             </div>
         <?php endif; ?>
         
         <form action="save.php" method="POST">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($_SESSION['csrf_token'], ENT_QUOTES, 'UTF-8') ?>">
+            
+            <?php if (isAuthenticated()): ?>
+                <input type="hidden" name="edit_mode" value="1">
+            <?php endif; ?>
+            
             <div class="form-grid">
                 <div class="form-group">
                     <label for="full_name">👤 ФИО *</label>
                     <input type="text" 
                            id="full_name" 
                            name="full_name" 
-                           value="<?= htmlspecialchars($old['full_name'] ?? '') ?>"
+                           value="<?= htmlspecialchars($old['full_name'] ?? '', ENT_QUOTES, 'UTF-8') ?>"
                            placeholder="Иванов Иван Иванович"
                            class="<?= isset($errors['full_name']) ? 'field-error' : '' ?>"
-                           required>
+                           required
+                           maxlength="150">
                     <?php if (isset($errors['full_name'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['full_name']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['full_name'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
-                    <small>Допустимы: русские и английские буквы, пробелы, дефисы</small>
+                    <small>Допустимы: русские и английские буквы, пробелы, дефисы (макс. 150 символов)</small>
                 </div>
                 
                 <div class="form-group">
@@ -514,12 +671,13 @@ if (empty($old) && !empty($savedData)) {
                     <input type="tel" 
                            id="phone" 
                            name="phone" 
-                           value="<?= htmlspecialchars($old['phone'] ?? '') ?>"
+                           value="<?= htmlspecialchars($old['phone'] ?? '', ENT_QUOTES, 'UTF-8') ?>"
                            placeholder="+7 (999) 123-45-67"
                            class="<?= isset($errors['phone']) ? 'field-error' : '' ?>"
-                           required>
+                           required
+                           maxlength="20">
                     <?php if (isset($errors['phone'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['phone']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['phone'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <small>Допустимы: цифры, пробелы, +, -, (, ) (5-20 символов)</small>
                 </div>
@@ -529,12 +687,13 @@ if (empty($old) && !empty($savedData)) {
                     <input type="email" 
                            id="email" 
                            name="email" 
-                           value="<?= htmlspecialchars($old['email'] ?? '') ?>"
+                           value="<?= htmlspecialchars($old['email'] ?? '', ENT_QUOTES, 'UTF-8') ?>"
                            placeholder="example@mail.com"
                            class="<?= isset($errors['email']) ? 'field-error' : '' ?>"
-                           required>
+                           required
+                           maxlength="100">
                     <?php if (isset($errors['email'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['email']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['email'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <small>Формат: name@domain.com (до 100 символов)</small>
                 </div>
@@ -544,11 +703,11 @@ if (empty($old) && !empty($savedData)) {
                     <input type="date" 
                            id="birth_date" 
                            name="birth_date" 
-                           value="<?= htmlspecialchars($old['birth_date'] ?? '') ?>"
+                           value="<?= htmlspecialchars($old['birth_date'] ?? '', ENT_QUOTES, 'UTF-8') ?>"
                            class="<?= isset($errors['birth_date']) ? 'field-error' : '' ?>"
                            required>
                     <?php if (isset($errors['birth_date'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['birth_date']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['birth_date'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <small>Диапазон: от 1900-01-01 до сегодня</small>
                 </div>
@@ -572,7 +731,7 @@ if (empty($old) && !empty($savedData)) {
                         </label>
                     </div>
                     <?php if (isset($errors['gender'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['gender']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['gender'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                 </div>
                 
@@ -585,24 +744,20 @@ if (empty($old) && !empty($savedData)) {
                             class="<?= isset($errors['languages']) ? 'field-error' : '' ?>"
                             required>
                         <?php
-                        $languages = [
-                            'Pascal', 'C', 'C++', 'JavaScript', 'PHP', 'Python',
-                            'Java', 'Haskell', 'Clojure', 'Prolog', 'Scala', 'Go'
-                        ];
                         $selectedLanguages = $old['languages'] ?? [];
                         if (!is_array($selectedLanguages)) {
                             $selectedLanguages = [];
                         }
-                        foreach ($languages as $lang):
+                        foreach ($languagesList as $lang):
                         ?>
-                            <option value="<?= $lang ?>" 
+                            <option value="<?= htmlspecialchars($lang, ENT_QUOTES, 'UTF-8') ?>" 
                                 <?= in_array($lang, $selectedLanguages) ? 'selected' : '' ?>>
-                                <?= $lang ?>
+                                <?= htmlspecialchars($lang, ENT_QUOTES, 'UTF-8') ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
                     <?php if (isset($errors['languages'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['languages']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['languages'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <small>Удерживайте Ctrl (Cmd) для выбора нескольких. Доступны только языки из списка</small>
                 </div>
@@ -611,9 +766,10 @@ if (empty($old) && !empty($savedData)) {
                     <label for="biography">📝 Биография</label>
                     <textarea id="biography" 
                               name="biography" 
-                              placeholder="Расскажите о себе..."><?= htmlspecialchars($old['biography'] ?? '') ?></textarea>
+                              placeholder="Расскажите о себе..."
+                              maxlength="65535"><?= htmlspecialchars($old['biography'] ?? '', ENT_QUOTES, 'UTF-8') ?></textarea>
                     <?php if (isset($errors['biography'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['biography']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['biography'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                     <small>Максимальная длина: 65535 символов</small>
                 </div>
@@ -624,12 +780,12 @@ if (empty($old) && !empty($savedData)) {
                                name="contract_accepted" 
                                id="contract" 
                                value="1"
-                               <?= isset($old['contract_accepted']) ? 'checked' : '' ?>
+                               <?= isset($old['contract_accepted']) && $old['contract_accepted'] === '1' ? 'checked' : '' ?>
                                required>
                         <label for="contract">✅ Я ознакомлен(а) с контрактом *</label>
                     </div>
                     <?php if (isset($errors['contract_accepted'])): ?>
-                        <span class="field-error-message"><?= htmlspecialchars($errors['contract_accepted']) ?></span>
+                        <span class="field-error-message"><?= htmlspecialchars($errors['contract_accepted'], ENT_QUOTES, 'UTF-8') ?></span>
                     <?php endif; ?>
                 </div>
             </div>
@@ -637,5 +793,39 @@ if (empty($old) && !empty($savedData)) {
             <button type="submit" class="btn">🚀 Отправить</button>
         </form>
     </div>
+    
+    <!-- Защита от XSS через JavaScript -->
+    <script>
+        // Дополнительная защита от XSS - экранирование динамического контента
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Проверка на наличие опасных символов в полях ввода
+        document.querySelectorAll('input, textarea').forEach(function(element) {
+            element.addEventListener('blur', function() {
+                if (this.value && /[<>]/.test(this.value)) {
+                    this.style.borderColor = '#ff4d4d';
+                    if (!this.nextElementSibling || !this.nextElementSibling.classList.contains('xss-warning')) {
+                        const warning = document.createElement('span');
+                        warning.className = 'field-error-message xss-warning';
+                        warning.style.color = '#ff8a8a';
+                        warning.innerHTML = '⚠️ Обнаружены потенциально опасные символы (<, >)';
+                        if (this.nextElementSibling) {
+                            this.parentNode.insertBefore(warning, this.nextElementSibling);
+                        } else {
+                            this.parentNode.appendChild(warning);
+                        }
+                    }
+                } else {
+                    this.style.borderColor = '';
+                    const warning = this.parentNode.querySelector('.xss-warning');
+                    if (warning) warning.remove();
+                }
+            });
+        });
+    </script>
 </body>
 </html>

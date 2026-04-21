@@ -1,22 +1,44 @@
 <?php
 // auth.php
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 require_once 'config.php';
 
-function generateLogin($fullName, $pdo) {
-    // Генерация логина из ФИО (транслитерация)
-    $translit = [
-        'а' => 'a', 'б' => 'b', 'в' => 'v', 'г' => 'g', 'д' => 'd', 'е' => 'e', 'ё' => 'e',
-        'ж' => 'zh', 'з' => 'z', 'и' => 'i', 'й' => 'y', 'к' => 'k', 'л' => 'l', 'м' => 'm',
-        'н' => 'n', 'о' => 'o', 'п' => 'p', 'р' => 'r', 'с' => 's', 'т' => 't', 'у' => 'u',
-        'ф' => 'f', 'х' => 'h', 'ц' => 'ts', 'ч' => 'ch', 'ш' => 'sh', 'щ' => 'sch', 'ъ' => '',
-        'ы' => 'y', 'ь' => '', 'э' => 'e', 'ю' => 'yu', 'я' => 'ya'
+// Функция для транслитерации без mbstring
+function simpleTranslit($text) {
+    $cyrillic = [
+        'а','б','в','г','д','е','ё','ж','з','и','й','к','л','м','н','о','п',
+        'р','с','т','у','ф','х','ц','ч','ш','щ','ъ','ы','ь','э','ю','я',
+        'А','Б','В','Г','Д','Е','Ё','Ж','З','И','Й','К','Л','М','Н','О','П',
+        'Р','С','Т','У','Ф','Х','Ц','Ч','Ш','Щ','Ъ','Ы','Ь','Э','Ю','Я'
+    ];
+    $latin = [
+        'a','b','v','g','d','e','e','zh','z','i','y','k','l','m','n','o','p',
+        'r','s','t','u','f','h','ts','ch','sh','sch','','y','','e','yu','ya',
+        'A','B','V','G','D','E','E','Zh','Z','I','Y','K','L','M','N','O','P',
+        'R','S','T','U','F','H','Ts','Ch','Sh','Sch','','Y','','E','Yu','Ya'
     ];
     
-    $name = mb_strtolower($fullName);
-    $login = strtr($name, $translit);
-    $login = preg_replace('/[^a-z0-9]/', '', $login);
+    // Используем str_replace вместо mb_strtolower
+    $text = str_replace($cyrillic, $latin, $text);
+    // Приводим к нижнему регистру стандартной функцией (работает с ASCII)
+    $text = strtolower($text);
+    // Удаляем все кроме букв и цифр
+    $text = preg_replace('/[^a-z0-9]/', '', $text);
+    
+    return $text;
+}
+
+function generateLogin($fullName, $pdo) {
+    // Транслитерация ФИО
+    $login = simpleTranslit($fullName);
     $login = substr($login, 0, 20);
+    
+    // Если получилась пустая строка, генерируем случайный логин
+    if (empty($login)) {
+        $login = 'user_' . bin2hex(random_bytes(4));
+    }
     
     // Проверяем уникальность
     $originalLogin = $login;
@@ -46,23 +68,44 @@ function login($login, $password, $pdo) {
     $user = $stmt->fetch();
     
     if ($user && password_verify($password, $user['password_hash'])) {
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['user_login'] = $user['login'];
         $_SESSION['authenticated'] = true;
+        session_regenerate_id(true);
         return true;
     }
     return false;
 }
 
 function isAuthenticated() {
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
     return isset($_SESSION['authenticated']) && $_SESSION['authenticated'] === true;
 }
 
 function getCurrentUserId() {
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
     return $_SESSION['user_id'] ?? null;
 }
 
 function logout() {
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+    $_SESSION = array();
+    if (ini_get("session.use_cookies")) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000,
+            $params["path"], $params["domain"],
+            $params["secure"], $params["httponly"]
+        );
+    }
     session_destroy();
 }
 
@@ -79,7 +122,6 @@ function getUserData($userId, $pdo) {
     $userData = $stmt->fetch();
     
     if ($userData) {
-        // Получаем языки как массив
         $userData['languages'] = $userData['languages_list'] ? explode(',', $userData['languages_list']) : [];
         unset($userData['languages_list']);
         unset($userData['password_hash']);
@@ -92,7 +134,6 @@ function updateUserData($userId, $data, $languages, $pdo) {
     try {
         $pdo->beginTransaction();
         
-        // Обновляем данные пользователя
         $stmt = $pdo->prepare("
             UPDATE users 
             SET full_name = :full_name,
@@ -122,15 +163,17 @@ function updateUserData($userId, $data, $languages, $pdo) {
         $stmt->execute([$userId]);
         
         // Добавляем новые связи
-        $placeholders = implode(',', array_fill(0, count($languages), '?'));
-        $stmt = $pdo->prepare("SELECT id, name FROM programming_languages WHERE name IN ($placeholders)");
-        $stmt->execute($languages);
-        $langIds = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-        
-        $stmt = $pdo->prepare("INSERT INTO user_languages (user_id, language_id) VALUES (?, ?)");
-        foreach ($languages as $lang) {
-            if (isset($langIds[$lang])) {
-                $stmt->execute([$userId, $langIds[$lang]]);
+        if (!empty($languages)) {
+            $placeholders = implode(',', array_fill(0, count($languages), '?'));
+            $stmt = $pdo->prepare("SELECT id, name FROM programming_languages WHERE name IN ($placeholders)");
+            $stmt->execute($languages);
+            $langIds = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            
+            $stmt = $pdo->prepare("INSERT INTO user_languages (user_id, language_id) VALUES (?, ?)");
+            foreach ($languages as $lang) {
+                if (isset($langIds[$lang])) {
+                    $stmt->execute([$userId, $langIds[$lang]]);
+                }
             }
         }
         
@@ -139,7 +182,8 @@ function updateUserData($userId, $data, $languages, $pdo) {
         
     } catch (Exception $e) {
         $pdo->rollBack();
-        throw $e;
+        error_log("Update user error: " . $e->getMessage());
+        return false;
     }
 }
 ?>
